@@ -2,24 +2,6 @@
 
 Encrypts & decrypts entire directories, recursively. Blazing fast!
 
-<style>
-.file-txt {
-    color: #9370DB;
-}
-
-.file-png {
-    color: #98FB98;
-}
-
-.file-folder {
-    color: #FFA07A;
-}
-
-.file-unknown {
-    color: #D3D3D3;
-}
-</style>
-
 <table>
 <tr>
     <td>Before</td>
@@ -51,7 +33,7 @@ Encrypts & decrypts entire directories, recursively. Blazing fast!
 </tr>
 </table>
 
-`dircrypt` runs extremely fast regardless of the size or number of files in the directory. It flattens the directory structure, removing suffixes and replacing filenames with UUIDs. This prevents your data from being indexed, previewed or searched, ensuring that your data is safe.
+`dircrypt` runs extremely fast regardless of the size or number of files in the directory. It flattens the directory structure, removing suffixes and replacing filenames with UUIDs. This prevents your data from being previewed, searched or accidentally presented, ensuring that your data is private.
 
 ## Dependencies
 
