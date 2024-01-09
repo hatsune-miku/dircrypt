@@ -1,12 +1,22 @@
 #!python3
 #encoding:utf-8
 
+"""
+dircrypt.py
+
+Encrypts & decrypts directories. Blazing fast!
+
+Naming Conventions:
+    - hashed: The renamed file
+"""
+
 import os
 import argparse
 import uuid
 import base64
 import logging
 import shutil
+import time
 from typing import Optional
 
 
@@ -16,20 +26,33 @@ def is_windows() -> bool:
     return os.name == 'nt'
 
 
+def pause():
+    input("Press the <ENTER> key to continue...")
+
+
 def dir_can_write(directory: str) -> bool:
     return os.access(directory, os.W_OK)
 
 
 def get_logger() -> logging.Logger:
     logger = logging.getLogger('dircrypt')
-    logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler()
+    file_logger = logging.getLogger('dircrypt-verbose')
+
+    logger.setLevel(logging.DEBUG)
+    file_logger.setLevel(logging.DEBUG)
+
+    logger_handler = logging.StreamHandler()
+    file_handler = logging.FileHandler('dircrypt.log', encoding='utf-8')
+
     formatter = logging.Formatter(
         "%(name)s %(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    return logger
+    logger_handler.setFormatter(formatter)
+    logger.addHandler(logger_handler)
+
+    file_logger.addHandler(file_handler)
+
+    return logger, file_logger
 
 
 def is_valid_dirname(dirname: str) -> bool:
@@ -40,12 +63,26 @@ def is_valid_dirname(dirname: str) -> bool:
     return True
 
 
+def is_valid_filename(filename: str) -> bool:
+    if filename.startswith('.'):
+        return False
+    if filename == 'desktop.ini':
+        return False
+    if filename == 'Thumbs.db':
+        return False
+    if filename == 'thumbs.db':
+        return False
+    return True
+
+
 def directory_list_recursive(path: str):
     """
     Yields (absolute path, folder)s.
     """
     for root, _, filenames in os.walk(path):
         for f in filenames:
+            if not is_valid_filename(f):
+                continue
             yield (
                 os.path.join(root, f).removeprefix(f"{path}/"),
                 root
@@ -55,6 +92,8 @@ def directory_list_recursive(path: str):
 ### === Classes ===
 
 class HashUtils:
+    uid_sequence = 0
+
     @staticmethod
     def base64_encode(s: str) -> str:
         return base64.b64encode(s.encode('utf-8')).decode('utf-8')
@@ -65,26 +104,27 @@ class HashUtils:
         return base64.b64decode(s.encode('utf-8')).decode('utf-8')
 
 
-    @staticmethod
-    def uuid() -> str:
-        return str(uuid.uuid4())
+    @classmethod
+    def uid(cls) -> str:
+        cls.uid_sequence += 1
+        return f"{uuid.uuid4()}-{cls.uid_sequence}"
 
 
 class Metadata:
     def __init__(self):
-        self._reverse_names = {}
+        self.hash_to_real = {}
 
 
     def set(self, hash_name: str, real_name: str) -> None:
-        self._reverse_names[hash_name] = real_name
+        self.hash_to_real[hash_name] = real_name
 
 
     def get(self, hash_name: str) -> Optional[str]:
-        return self._reverse_names.get(hash_name)
+        return self.hash_to_real.get(hash_name)
 
 
     def contains_hash(self, hash_name: str) -> bool:
-        return hash_name in self._reverse_names
+        return hash_name in self.hash_to_real
 
 
     def  __contains__(self, hash_name: str) -> bool:
@@ -100,16 +140,16 @@ class Metadata:
 
 
     def __len__(self) -> int:
-        return len(self._reverse_names)
+        return len(self.hash_to_real)
 
 
     def __iter__(self):
-        yield from self._reverse_names.items()
+        yield from self.hash_to_real.items()
 
 
     def __str__(self) -> str:
         return '\n'.join(
-            [': '.join([h, r]) for h, r in self._reverse_names.items()]
+            [': '.join([h, r]) for h, r in self.hash_to_real.items()]
         )
 
 
@@ -119,7 +159,7 @@ class Metadata:
             f.write("DON'T RENAME, MOVE OR MODIFY ANY FILE IN THIS DIRECTORY "
                     "OR ALL DATA WILL BE LOST\n")
             f.write("切勿删、改、移动此目录下的任何文件，否则所有数据将丢失\n\n")
-            for hash_name, real_name in self._reverse_names.items():
+            for hash_name, real_name in self.hash_to_real.items():
                 map_string = ':'.join([hash_name, real_name])
                 map_string = HashUtils.base64_encode(map_string)
                 map_string = '~' + map_string
@@ -133,11 +173,11 @@ class Metadata:
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = list(map(str.strip, f.readlines()))
             if len(lines) == 0:
-                raise ValueError('Metadata file is empty or unreadable.')
+                raise ValueError("Metadata file is empty or unreadable.")
 
             first_line = lines.pop(0)
             if first_line != 'DCMETA':
-                raise ValueError('Metadata file is not a DCMETA file.')
+                raise ValueError("Metadata file is not a DCMETA file.")
 
             for line in lines:
                 if not line.startswith('~'):
@@ -146,7 +186,7 @@ class Metadata:
                 map_string = HashUtils.base64_decode(line[1:])
                 map_string = map_string.split(':')
                 if len(map_string) != 2:
-                    raise ValueError('Metadata file is corrupted.')
+                    raise ValueError("Metadata file is corrupted.")
 
                 hash_name, real_name = map_string
                 ret.set(hash_name, real_name)
@@ -154,8 +194,16 @@ class Metadata:
 
 
 class DirectoryEncryptor:
-    def __init__(self, logger: logging.Logger, root: str, suffix: str, encrypt_header: bool):
+    def __init__(
+        self,
+        logger: logging.Logger,
+        file_logger: logging.Logger,
+        root: str,
+        suffix: str,
+        encrypt_header: bool
+    ):
         self.logger = logger
+        self.file_logger = file_logger
         self.root = root
         self.suffix = suffix
         self.encrypt_header = encrypt_header
@@ -165,6 +213,7 @@ class DirectoryEncryptor:
             self.mode = 'decrypt'
             self.paths = None
             self.folders = None
+            self.file_count = len(self.metadata)
         else:
             self.metadata = Metadata()
             self.mode = 'encrypt'
@@ -174,7 +223,7 @@ class DirectoryEncryptor:
                 self.paths.append(path)
                 if folder != self.root:
                     self.folders.append(folder)
-            print(self.folders)
+            self.file_count = len(self.paths)
 
 
     def get_mode(self) -> str:
@@ -182,6 +231,13 @@ class DirectoryEncryptor:
         Returns 'encrypt' or 'decrypt'.
         """
         return self.mode
+
+
+    def count(self) -> int:
+        """
+        Returns the number of files to be encrypted/decrypted.
+        """
+        return self.file_count
 
 
     def _obfuscate_header(self, path: str) -> None:
@@ -197,55 +253,125 @@ class DirectoryEncryptor:
 
     def restore_from_metadata(self) -> None:
         self.logger.info('Existing metadata found.')
-        for hashed_path, real_path in self.metadata:
+        self.logger.info('Restoring...')
+
+        count = len(self.metadata)
+
+        for i, (hashed_path, metadata_path_abs) in enumerate(self.metadata):
+            if ((i + 1) % 100 == 0) or (i + 1 == count):
+                self.logger.info(f"Decrypting {i + 1}/{count}...")
+
+            # Convert to host path
             hashed_path = os.path.join(self.root, hashed_path)
-            real_path = os.path.join(self.root, real_path)
-            dirname = os.path.dirname(real_path)
-            if dirname != '':
-                os.makedirs(dirname, exist_ok=True)
-            if os.path.exists(hashed_path):
-                shutil.move(hashed_path, real_path)
-                if self.encrypt_header:
-                    self._obfuscate_header(real_path)
-                self.logger.info(
-                    f"{hashed_path} -> {real_path}" + 
-                    (' (Decrypt Header)' if self.encrypt_header else '')
-                )
-            else:
-                self.logger.warning(f"Missing file: {hashed_path}")
+            metadata_path_abs = os.path.join(self.root, metadata_path_abs)
+            metadata_path_dir_abs = os.path.dirname(metadata_path_abs)
+
+            # Create the dir if it's not root
+            if metadata_path_dir_abs != '':
+                os.makedirs(metadata_path_dir_abs, exist_ok=True)
+
+            # Required hash file not found?
+            if not os.path.exists(hashed_path):
+                self.logger.warning(f"Missing file during restore: {hashed_path}")
+                continue
+
+            # Restore the file
+            try:
+                shutil.move(hashed_path, metadata_path_abs)
+            except Exception as e:
+                self.logger.warning(f"Failed to restore {hashed_path}. Error is:")
+                self.logger.warning(e)
+                continue
+
+            if self.encrypt_header:
+                try:
+                    self._obfuscate_header(metadata_path_abs)
+                except Exception as e:
+                    self.logger.warning(f"Failed to deobfs header for {metadata_path_abs}:")
+                    self.logger.warning(e)
+                    continue
+
+            self.file_logger.info(
+                f"{hashed_path} -> {metadata_path_abs}" + 
+                (' (Decrypt Header)' if self.encrypt_header else '')
+            )
 
         self.logger.info('Removing metadata...')
-        os.remove(os.path.join(self.root, 'DCMETA.txt'))
-        shutil.rmtree(os.path.join(self.root, 'DCDATA'), ignore_errors=True)
+        try:
+            os.remove(os.path.join(self.root, 'DCMETA.txt'))
+            shutil.rmtree(os.path.join(self.root, 'DCDATA'), ignore_errors=True)
+        except:
+            self.logger.info("Failed to remove metadata - It's OK")
 
 
     def write_metadata_and_encrypt(self) -> None:
         self.logger.info('Encrypting...')
-        os.makedirs(os.path.join(self.root, 'DCDATA'), exist_ok=True)
+
+        # Convert to host path
+        real_dcdata_path = os.path.join(self.root, 'DCDATA')
+        os.makedirs(real_dcdata_path, exist_ok=True)
+
         metadata = Metadata()
-        for path in self.paths:
-            hashed_path = HashUtils.uuid() + self.suffix
-            hashed_path_relative = os.path.join('DCDATA', hashed_path)
-            hashed_path = os.path.join(self.root, hashed_path_relative)
-            shutil.move(
-                os.path.join(self.root, path),
-                hashed_path
-            )
+        count = len(self.paths)
+
+        for i, path in enumerate(self.paths):
+            prefix = 'obfs.' if self.encrypt_header else ''
+            hashed_path = prefix + HashUtils.uid() + self.suffix
+            hashed_path_rel = os.path.join('DCDATA', hashed_path)
+            hashed_path_abs = os.path.join(self.root, hashed_path_rel)
+
+            if ((i + 1) % 100 == 0) or (i + 1 == count):
+                self.logger.info(f"Encrypting {i + 1}/{count}...")
+
+            # Rename the file
+            try:
+                shutil.move(
+                    os.path.join(self.root, path),
+                    hashed_path_abs
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to encrypt {path}. Error is:")
+                self.logger.warning(e)
+                continue
 
             if self.encrypt_header:
-                self._obfuscate_header(hashed_path)
-            self.logger.info(
-                f"{path} -> {hashed_path}" + 
+                try:
+                    self._obfuscate_header(hashed_path_abs)
+                except Exception as e:
+                    self.logger.warning(f"Failed to obfuscate header for {hashed_path_abs}:")
+                    self.logger.warning(e)
+                    continue
+
+            self.file_logger.info(
+                f"{path} -> {hashed_path_abs}" + 
                 (' (Encrypt Header)' if self.encrypt_header else '')
             )
+            metadata.set(hashed_path_rel, path)
 
-            metadata.set(hashed_path_relative, path)
-        metadata.save(os.path.join(self.root, 'DCMETA.txt'))
+        self.logger.info('Writing metadata...')
+        while True:
+            try:
+                metadata.save(os.path.join(self.root, 'DCMETA.txt'))
+                break
+            except Exception as e:
+                self.logger.error("!! Failed to write metadata. Error is:")
+                self.logger.error(e)
+                self.logger.error("!! METADATA MUST BE WRITABLE, OR ALL DATA WILL BE LOST.")
+                self.logger.error("!! dircrypt will try until it succeeds.")
+                self.logger.error("Press any key to continue...")
+                pause()
+
 
         self.logger.info('Removing old directories...')
         for folder in self.folders:
-            self.logger.info(f"Removing {folder}...")
-            shutil.rmtree(folder, ignore_errors=True)
+            self.file_logger.info(f"Removing {folder}...")
+            try:
+                shutil.rmtree(folder, ignore_errors=True)
+            except Exception as e:
+                self.logger.warning(f"Failed to remove {folder}. Error is:")
+                self.logger.warning(e)
+                self.logger.warning("It's OK that the folder is not removed.")
+                continue
 
     @classmethod
     def read_metadata(cls, path: str) -> Optional[Metadata]:
@@ -265,6 +391,7 @@ class DirectoryEncryptor:
 
 
 def main() -> None:
+    logger, file_logger = get_logger()
     parser = argparse.ArgumentParser(
         prog='dircrypt',
         description='Encrypts & decrypts directories. Blazing fast!',
@@ -284,23 +411,35 @@ def main() -> None:
         return
 
     if not dir_can_write(args.path):
-        print(f"Error: Directory '{args.path}' is not writable.")
+        logger.info("Error: Directory %s is not writable.", args.path)
         return
 
-    logger = get_logger()
+    if args.encrypt_header:
+        logger.info("Header encryption is enabled. This slows down the process.")
+
+
     logger.info('Building directory map...')
+
+    start_time = time.time()
 
     encryptor = DirectoryEncryptor(
         logger=logger,
+        file_logger=file_logger,
         root=args.path,
         suffix=args.suffix,
         encrypt_header=args.encrypt_header
     )
-    if encryptor.get_mode() == 'decrypt':
+
+    mode = encryptor.get_mode()
+    logger.info("%d files to be %sed.", encryptor.count(), mode)
+
+    if mode == 'decrypt':
         encryptor.restore_from_metadata()
     else:
         encryptor.write_metadata_and_encrypt()
-    logger.info('Done!')
+
+    end_time = time.time()
+    logger.info("✨Done in %.2fs", end_time - start_time)
 
 
 if __name__ == '__main__':
