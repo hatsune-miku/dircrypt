@@ -297,25 +297,32 @@ class DirectoryEncryptor:
                 continue
 
             # If user specified to decrypt header when they shouldn't
-            if not should_decrypt and self.encrypt_header:
+            if should_decrypt != self.encrypt_header:
                 if not flag_always_do_it:
-                    self.logger.warning(f"File {hashed_path} appears to be not encrypted,")
-                    self.logger.warning("but user specified to decrypt header.")
+                    file_state = 'encrypted' if should_decrypt else 'not encrypted'
+                    user_action = 'to decrypt' if self.encrypt_header else 'not to decrypt'
+
+                    self.logger.warning(f"File {hashed_path} appears to be {file_state},")
+                    self.logger.warning(f"but user specified {user_action} header.")
                     self.logger.warning("===============================================")
                     self.logger.warning("Doing so may cause the file to be CORRUPTED & UNRECVOVERABLE.")
                     self.logger.warning("If you know exactly what you are doing,")
                     self.logger.warning("Enter 'JUST DO IT' to continue, or")
                     self.logger.warning("Enter 'ALWAYS DO IT' to apply this to all files, or")
-                    self.logger.warning("Enter anything else to skip this file.")
+                    self.logger.warning("Enter 'SKIP' to skip this file only, or")
+                    self.logger.warning("Enter anything else to abort.")
                     self.logger.warning("===============================================")
                     user_input = input('\nInput your choice: ').strip()
                     if user_input == 'ALWAYS DO IT':
                         flag_always_do_it = True
                     elif user_input == 'JUST DO IT':
                         pass
-                    else:
+                    elif user_input == 'SKIP':
                         self.logger.warning(f"Skipped - file {hashed_path} is unchanged.")
                         continue
+                    else:
+                        self.logger.warning(f"Aborted.")
+                        return
 
             if self.encrypt_header:
                 try:
