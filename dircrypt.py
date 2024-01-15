@@ -20,10 +20,13 @@ import time
 from typing import Optional
 
 
-### === Utils ===
+### === Global definitions ===
 
-def is_windows() -> bool:
-    return os.name == 'nt'
+PATH_SEPERATOR = '*'
+IS_WINDOWS = os.name == 'nt'
+
+
+### === Utils ===
 
 
 def pause():
@@ -49,30 +52,36 @@ def get_logger() -> logging.Logger:
         datefmt="%H:%M:%S")
     logger_handler.setFormatter(formatter)
     logger.addHandler(logger_handler)
-
     file_logger.addHandler(file_handler)
-
     return logger, file_logger
+
+
+def normalize_path(path: str) -> str:
+    """
+    Normalizes a path by unifying the seperator to `/`.
+    """
+    if IS_WINDOWS:
+        return path.replace('\\', '/')
+    return path
+
+
+def join_path(root: str, path: str) -> str:
+    """
+    `os.path.join` but always uses `/` as seperator.
+    """
+    return normalize_path(os.path.join(root, path))
 
 
 def is_valid_dirname(dirname: str) -> bool:
     if dirname.startswith('.'):
         return False
-    if dirname == '$RECYCLE.BIN':
-        return False
-    return True
+    return dirname not in ['System Volume Information', 'DCDATA', '$RECYCLE.BIN']
 
 
 def is_valid_filename(filename: str) -> bool:
     if filename.startswith('.'):
         return False
-    if filename == 'desktop.ini':
-        return False
-    if filename == 'Thumbs.db':
-        return False
-    if filename == 'thumbs.db':
-        return False
-    return True
+    return filename not in ['desktop.ini', 'Thumbs.db', 'thumbs.db']
 
 
 def directory_list_recursive(path: str):
@@ -83,9 +92,10 @@ def directory_list_recursive(path: str):
         for f in filenames:
             if not is_valid_filename(f):
                 continue
+            
             yield (
-                os.path.join(root, f).removeprefix(f"{path}/"),
-                root
+                join_path(root, f).removeprefix(f"{path}/"),
+                normalize_path(root)
             )
 
 
@@ -160,7 +170,7 @@ class Metadata:
                     "OR ALL DATA WILL BE LOST\n")
             f.write("切勿删、改、移动此目录下的任何文件，否则所有数据将丢失\n\n")
             for hash_name, real_name in self.hash_to_real.items():
-                map_string = ':'.join([hash_name, real_name])
+                map_string = PATH_SEPERATOR.join([hash_name, real_name])
                 map_string = HashUtils.base64_encode(map_string)
                 map_string = '~' + map_string
                 f.write(map_string + '\n')
@@ -184,7 +194,7 @@ class Metadata:
                     continue
 
                 map_string = HashUtils.base64_decode(line[1:])
-                map_string = map_string.split(':')
+                map_string = map_string.split(PATH_SEPERATOR)
                 if len(map_string) != 2:
                     raise ValueError("Metadata file is corrupted.")
 
@@ -204,11 +214,11 @@ class DirectoryEncryptor:
     ):
         self.logger = logger
         self.file_logger = file_logger
-        self.root = root
+        self.root = normalize_path(root)
         self.suffix = suffix
         self.encrypt_header = encrypt_header
 
-        if os.path.exists(os.path.join(root, 'DCMETA.txt')):
+        if os.path.exists(join_path(root, 'DCMETA.txt')):
             self.metadata = self.read_metadata(root)
             self.mode = 'decrypt'
             self.paths = None
@@ -256,15 +266,18 @@ class DirectoryEncryptor:
         self.logger.info('Restoring...')
 
         count = len(self.metadata)
+        flag_always_do_it = False
 
         for i, (hashed_path, metadata_path_abs) in enumerate(self.metadata):
             if ((i + 1) % 100 == 0) or (i + 1 == count):
                 self.logger.info(f"Decrypting {i + 1}/{count}...")
 
+            should_decrypt = hashed_path.startswith('DCDATA/obfs.')
+
             # Convert to host path
-            hashed_path = os.path.join(self.root, hashed_path)
-            metadata_path_abs = os.path.join(self.root, metadata_path_abs)
-            metadata_path_dir_abs = os.path.dirname(metadata_path_abs)
+            hashed_path = join_path(self.root, hashed_path)
+            metadata_path_abs = join_path(self.root, metadata_path_abs)
+            metadata_path_dir_abs = normalize_path(os.path.dirname(metadata_path_abs))
 
             # Create the dir if it's not root
             if metadata_path_dir_abs != '':
@@ -283,6 +296,27 @@ class DirectoryEncryptor:
                 self.logger.warning(e)
                 continue
 
+            # If user specified to decrypt header when they shouldn't
+            if not should_decrypt and self.encrypt_header:
+                if not flag_always_do_it:
+                    self.logger.warning(f"File {hashed_path} appears to be not encrypted,")
+                    self.logger.warning("but user specified to decrypt header.")
+                    self.logger.warning("===============================================")
+                    self.logger.warning("Doing so may cause the file to be CORRUPTED & UNRECVOVERABLE.")
+                    self.logger.warning("If you know exactly what you are doing,")
+                    self.logger.warning("Enter 'JUST DO IT' to continue, or")
+                    self.logger.warning("Enter 'ALWAYS DO IT' to apply this to all files, or")
+                    self.logger.warning("Enter anything else to skip this file.")
+                    self.logger.warning("===============================================")
+                    user_input = input('\nInput your choice: ').strip()
+                    if user_input == 'ALWAYS DO IT':
+                        flag_always_do_it = True
+                    elif user_input == 'JUST DO IT':
+                        pass
+                    else:
+                        self.logger.warning(f"Skipped - file {hashed_path} is unchanged.")
+                        continue
+
             if self.encrypt_header:
                 try:
                     self._obfuscate_header(metadata_path_abs)
@@ -298,8 +332,8 @@ class DirectoryEncryptor:
 
         self.logger.info('Removing metadata...')
         try:
-            os.remove(os.path.join(self.root, 'DCMETA.txt'))
-            shutil.rmtree(os.path.join(self.root, 'DCDATA'), ignore_errors=True)
+            os.remove(join_path(self.root, 'DCMETA.txt'))
+            shutil.rmtree(join_path(self.root, 'DCDATA'), ignore_errors=True)
         except:
             self.logger.info("Failed to remove metadata - It's OK")
 
@@ -308,7 +342,7 @@ class DirectoryEncryptor:
         self.logger.info('Encrypting...')
 
         # Convert to host path
-        real_dcdata_path = os.path.join(self.root, 'DCDATA')
+        real_dcdata_path = join_path(self.root, 'DCDATA')
         os.makedirs(real_dcdata_path, exist_ok=True)
 
         metadata = Metadata()
@@ -317,8 +351,8 @@ class DirectoryEncryptor:
         for i, path in enumerate(self.paths):
             prefix = 'obfs.' if self.encrypt_header else ''
             hashed_path = prefix + HashUtils.uid() + self.suffix
-            hashed_path_rel = os.path.join('DCDATA', hashed_path)
-            hashed_path_abs = os.path.join(self.root, hashed_path_rel)
+            hashed_path_rel = join_path('DCDATA', hashed_path)
+            hashed_path_abs = join_path(self.root, hashed_path_rel)
 
             if ((i + 1) % 100 == 0) or (i + 1 == count):
                 self.logger.info(f"Encrypting {i + 1}/{count}...")
@@ -326,7 +360,7 @@ class DirectoryEncryptor:
             # Rename the file
             try:
                 shutil.move(
-                    os.path.join(self.root, path),
+                    join_path(self.root, path),
                     hashed_path_abs
                 )
             except Exception as e:
@@ -351,7 +385,7 @@ class DirectoryEncryptor:
         self.logger.info('Writing metadata...')
         while True:
             try:
-                metadata.save(os.path.join(self.root, 'DCMETA.txt'))
+                metadata.save(join_path(self.root, 'DCMETA.txt'))
                 break
             except Exception as e:
                 self.logger.error("!! Failed to write metadata. Error is:")
@@ -375,7 +409,7 @@ class DirectoryEncryptor:
 
     @classmethod
     def read_metadata(cls, path: str) -> Optional[Metadata]:
-        meta_path = os.path.join(path, 'DCMETA.txt')
+        meta_path = join_path(path, 'DCMETA.txt')
         if not os.path.exists(meta_path):
             return None
         return Metadata.parse(meta_path)
