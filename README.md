@@ -1,3 +1,7 @@
+## Malware!?
+
+Well, there is a namesake - I didn't realize a virus also named `Dircrypt` (⊙_⊙;)
+
 ## dircrypt
 
 Encrypts & decrypts entire directories, recursively. Blazing fast!
